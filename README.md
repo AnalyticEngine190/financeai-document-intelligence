@@ -14,7 +14,7 @@ FinanceAI is a local-first financial document intelligence application. It combi
 - Offers a market-data integration through Twelve Data when an API key is configured.
 - Provides a Streamlit interface backed by a FastAPI service.
 
-The test suite contains report-layout regression examples for Nordea, SEB, Handelsbanken, Jyske, and Danske reports. These fixtures are focused examples, not a guarantee that every document layout or question is supported.
+The JSON files under `tests/fixtures/` are **synthetic regression fixtures**. They use fictional report text, invented institutions and invented financial values to exercise table layouts, period alignment, segment extraction, scope handling, and citation behaviour. They are not reproductions of bank reports and should not be treated as financial data. Some fixture filenames and test names retain historical issuer labels for test-path continuity.
 
 ## Architecture
 
@@ -25,7 +25,21 @@ The test suite contains report-layout regression examples for Nordea, SEB, Hande
 - **Vector store:** ChromaDB is persisted locally at `~/FinanceAI_Local/chroma_db` by `app/vector_store.py`.
 - **Local language model:** the current development setup uses Ollama with `qwen3:4b` for local LLM-backed responses.
 
-The local ChromaDB database and source PDFs are not part of the public source repository. A fresh installation starts without your local documents or index; users must ingest their own documents.
+The local ChromaDB database and source PDFs are not part of the public source repository. A fresh installation starts without your local documents or index; users must obtain reports from their publishers, ingest their own documents, and build a local index.
+
+## AI-assisted development approach
+
+I use AI as a **guided engineering assistant**, not as an autonomous developer or a substitute for understanding the project. I remain responsible for defining the intended behaviour, deciding how a change should fit into the application, reviewing the implementation, and verifying the result.
+
+My prompts are deliberately specific. Rather than asking a broad question such as "build this feature for me", I break the work into small, testable instructions. I identify the relevant file or function, describe the inputs and expected outputs, specify the control flow and edge cases, and state what must not change.
+
+For example, a prompt may look like this:
+
+> In `tests/test_answering.py`, add a loop over these cases. For each case, call the specified helper with these inputs and assert the expected result. Around this particular operation, add a `try/except` block for the expected exceptions listed here. Let unexpected exceptions remain visible, and do not modify unrelated application logic.
+
+AI can help draft a focused implementation, explain unfamiliar code, suggest tests, or investigate a failure. I then inspect the proposed changes, ask for clarification or revisions where needed, run the relevant tests, examine failures, and iterate until the behaviour matches the requirements. I do not treat generated code as correct merely because it looks plausible or runs once.
+
+This workflow keeps the technical direction and acceptance criteria with me while using AI to accelerate implementation, debugging, and test development. The final responsibility for reviewing and validating the code remains mine.
 
 ## Requirements
 
@@ -96,11 +110,11 @@ Run the tests from the project root:
 python -m pytest -q
 ```
 
-**Latest owner-reported local verification after the public-test adjustment:** 677 tests passed, 2 dependency warnings, in 33.62 seconds. This run was performed in the developer's original Windows workspace, where private local evaluation files were available. The warnings came from ChromaDB's telemetry code and the installed `fitz`/PyMuPDF compatibility API.
+**Latest owner-reported test run of the public upload copy:** 649 passed, 28 skipped, 0 failed, and 2 dependency warnings in 39.38 seconds, using Python 3.14.6 in the developer's Windows environment.
 
-**Private Day 11 benchmark handling:** `tests/test_day11_12_tools.py` uses the local `data/evaluation/day11_50_candidate.json` benchmark. Only tests that require that benchmark skip when the JSON is absent (as it will be in a clean public clone). Their original assertions still run in the original local workspace where the benchmark exists. Generic tests in that module remain runnable without the benchmark.
+The 28 skips are intentional. They cover tests that require private Day 10.4, Day 11, Day 14, and Nordea benchmark datasets that are not distributed in this repository. Those tests retain their assertions and run when the corresponding private datasets are available in the developer's local workspace. This result was obtained from the prepared upload copy using an already configured local Python environment; a clean installation on a separate machine has not yet been independently verified.
 
-`tests/test_day13_5_freeze.py` builds a disposable synthetic project under pytest's temporary directory; it does not require the real sealed benchmark or historical report-freeze folders and remains unchanged. Other tests are retained. A full test run from a fresh public clone has **not** yet been verified, so the local 677-pass result must not be represented as a clean-clone result.
+The two warnings came from a ChromaDB telemetry deprecation and the installed `fitz`/PyMuPDF compatibility API. They did not cause test failures.
 
 The `scripts/` and `tools/` folders include both useful development utilities and historical evaluation/freeze tools. Some of those tools require private local artifacts and are not part of the normal application startup path.
 
@@ -113,7 +127,7 @@ The following are local development data, not source code, and should remain out
 - `evaluation/` — local retrieval evaluation output.
 - The ChromaDB database under the user's home directory.
 
-The application may process financial documents supplied by the user. Treat uploaded documents, extracted text, indexes, logs, and generated answers according to the confidentiality and licensing requirements of those documents.
+FinanceAI can process financial documents supplied by the user. Treat uploaded documents, extracted text, indexes, logs, and generated answers according to the confidentiality and licensing requirements of those documents. Public availability of a source PDF does not by itself establish permission to redistribute that PDF; obtain it from the publisher and ingest it locally.
 
 ## Production considerations
 

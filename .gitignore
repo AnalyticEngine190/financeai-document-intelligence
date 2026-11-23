@@ -1,0 +1,42 @@
+# Python environments
+.venv/
+venv/
+env/
+
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.market.example
+.streamlit/secrets.toml
+
+# Local documents, indexes, and private evaluation material
+/data/
+/reports/
+/evaluation/
+*.pdf
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and generated artifacts
+*.log
+*.zip
+
+# Local model downloads and caches
+models/
+.cache/
