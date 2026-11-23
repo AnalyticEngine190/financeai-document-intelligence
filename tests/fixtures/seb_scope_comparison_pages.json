@@ -1,0 +1,15 @@
+{
+  "note": "Synthetic scope comparison fixture with invented financial values.",
+  "pages": [
+    {
+      "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+      "page": 5,
+      "text": "Maple Financial\nGroup\nIncome statement\nSEKm\nQ326 Q226 Q325\nOperating profit    10,080    10,500    9,950\n"
+    },
+    {
+      "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+      "page": 21,
+      "text": "Maple Financial\nBaltic division\nSEKm\nQ326 Q226 Q325\nOperating profit    2,050    1,880    1,760\n"
+    }
+  ]
+}

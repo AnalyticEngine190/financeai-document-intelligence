@@ -1,0 +1,74 @@
+{
+  "note": "Synthetic regression fixture: all institutions, figures and text are fictional.",
+  "documents": {
+    "handelsbanken": [
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 10,
+        "text": "Harbor Bank\nBusiness segments\nFive business segments\nHarbor Retail\nHarbor Business\nHarbor Corporate\nHarbor Wealth\nHarbor Markets\nOther and adjustments/eliminations separately\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 11,
+        "text": "Harbor Bank\nBUSINESS SEGMENTS\nHarbor Retail\nHarbor Retail provides everyday banking, savings and payment services to households and private customers.\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 13,
+        "text": "Harbor Bank\nBUSINESS SEGMENTS\nHarbor Business\nHarbor Business provides deposits, lending and cash-management services to small and medium-sized businesses.\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 15,
+        "text": "Harbor Bank\nBUSINESS SEGMENTS\nHarbor Corporate\nHarbor Corporate provides financing, treasury and transaction services to large companies and institutions.\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 17,
+        "text": "Harbor Bank\nBUSINESS SEGMENTS\nHarbor Wealth\nHarbor Wealth provides investment advice, portfolio services and retirement planning.\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 19,
+        "text": "Harbor Bank\nBUSINESS SEGMENTS\nHarbor Markets\nMarkets reporting note\nFee and transaction income is recognised in the respective home market division.\nOperating profit\nSEKm\nQ326 Q226 Q325\nOperating profit    -35    -42    -31\n"
+      },
+      {
+        "document": "Harbor Bank Synthetic Quarterly Review Q3 2026",
+        "page": 24,
+        "text": "Harbor Bank\nConsolidated income statement\nSEKm\nQ326 Q226 Q325\nTotal income    14,000    13,497    13,100\nTotal operating income    14,000    13,497    13,100\nNet interest income    10,400    10,250    10,000\nOperating profit    7,350    6,675    6,300\nProfit for the period    6,125    5,900    5,500\nTaxes    -1,725    -1,650    -1,500\nEarnings per share    2.91    2.80    2.60\n"
+      }
+    ],
+    "seb": [
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 5,
+        "text": "Maple Financial\nGroup income statement\nSEKm\nQ326 Q226 Q325\nTotal income    18,500    19,400    18,750\nTotal operating income    18,500    19,400    18,750\nOperating profit    10,080    10,500    9,950\n"
+      },
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 14,
+        "text": "Maple Financial\nBUSINESS AREAS\nBusiness segment overview\nCorporate & Investment Banking\nBusiness & Retail Banking\nWealth & Asset Management\nBaltic\nGroup Functions\nGroup Functions are reported separately.\nEliminations are shown as a reporting column.\n"
+      },
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 15,
+        "text": "Maple Financial\nBUSINESS AREAS\nCorporate & Investment Banking\nThis division serves enterprise, institutional and mid-market customers with financing, advisory and transaction services.\n"
+      },
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 17,
+        "text": "Maple Financial\nBUSINESS AREAS\nBusiness & Retail Banking\nThis division serves households and small businesses with everyday banking, savings, payments and lending.\n"
+      },
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 19,
+        "text": "Maple Financial\nBUSINESS AREAS\nWealth & Asset Management\nThis division provides investment management, Private Client Advisory and portfolio services.\n"
+      },
+      {
+        "document": "Maple Financial Synthetic Quarterly Report Q3 2026",
+        "page": 21,
+        "text": "Maple Financial\nBUSINESS AREAS\nBaltic\nThe division serves customers in Denmark, Finland and nearby coastal markets.\nDeposits from the public\nSEKbn\nQ326 Q226 Q325\nDeposits from the public    310    302    288\nOperating profit\nSEKm\nQ326 Q226 Q325\nOperating profit    2,050    1,880    1,760\n"
+      }
+    ]
+  }
+}

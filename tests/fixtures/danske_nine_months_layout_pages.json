@@ -1,0 +1,15 @@
+{
+  "note": "Synthetic nine-month interim-report excerpt for parser regression tests. All institution names and financial values are fictional.",
+  "pages": [
+    {
+      "document": "meridian-9m",
+      "page": 3,
+      "text": "3 Meridian Bank / Interim report - first nine months 2026\nFinancial highlights Executive summary Financial review Business units Financial statements\nIncome statement\nQ1-Q3    Q1-Q3    Index    Q3    Q2    Index    Q3    Index    Full year\n(DKK millions)    2026    2025    26/25    2026    2026    Q3/Q2    2025    26/25    2025\nTotal income    44,280    43,910    101    14,720    14,510    101    14,060    105    58,400\nProfit before tax    23,140    22,760    102    7,820    7,610    103    7,340    107    30,500\nTax    5,790    5,690    102    1,955    1,902    103    1,835    107    7,600\nNet profit    17,350    17,070    102    5,865    5,708    103    5,505    107    22,900\nNet profit attributable to minority holders    2    3    67    1    1    100    2    50    4\n"
+    },
+    {
+      "document": "meridian-9m",
+      "page": 11,
+      "text": "11 Meridian Bank / Interim report - first nine months 2026\nFinancial highlights Executive summary Financial review Business units Financial statements\nBusiness units\nRetail and Private Banking\nThis unit provides day-to-day banking, savings and investment services to households and private customers.\nBusiness Banking\nThis unit advises small and medium-sized enterprises and larger commercial customers.\nCorporate and Institutional Banking\nThis unit serves the financing and transaction needs of corporate and institutional customers.\nRetirement and Protection\nThis unit provides pension and insurance services, including retirement products and life protection.\nRegional Services\nThis unit provides customer support and selected banking services across the group's regional network.\n"
+    }
+  ]
+}
