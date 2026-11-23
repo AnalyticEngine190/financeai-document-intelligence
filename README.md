@@ -4,6 +4,32 @@ FinanceAI is a local-first financial document intelligence application. It combi
 
 > **Project status:** portfolio / development project. This README describes the current local application; it does not claim that the system has completed a production security review or independent financial validation.
 
+## Screenshots
+
+The screenshots below show the application interface and selected example workflows.
+
+**Fun mode is on in these screenshots to add some colour.** Its reactions are cosmetic and do not change financial answers or market-data results.
+
+### First screen
+
+![FinanceAI initial screen](assets/screenshots/First%20screen.png)
+
+### Financial-report question answering
+
+![FinanceAI answering a financial-report question with report and page citations](assets/screenshots/01-financial-assistant.png)
+
+### Company overview
+
+![FinanceAI company overview with business areas, financial metrics, and source citations](assets/screenshots/02-company-overview.png)
+
+### Market quote
+
+![FinanceAI stock quote with exchange, provider date, and source information](assets/screenshots/03-market-quote.png)
+
+### Market comparison
+
+![FinanceAI 30-day stock performance comparison chart](assets/screenshots/04-market-comparison.png)
+
 ## What it does
 
 - Ingests financial PDF reports and makes their contents searchable.
