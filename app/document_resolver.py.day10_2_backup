@@ -1,0 +1,178 @@
+"""Strict automatic/manual PDF selection. No embedding-based source guessing."""
+from __future__ import annotations
+from dataclasses import dataclass
+import re
+from typing import Literal
+
+from app.document_registry import DocumentRecord
+
+
+@dataclass(frozen=True)
+class DocumentSelection:
+    mode: Literal["auto", "manual", "compare"] = "auto"
+    document_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Resolution:
+    documents: tuple[DocumentRecord, ...]
+    reason: str
+    clarification: str | None = None
+
+
+def _issuer_matches(question: str, reports: list[DocumentRecord]) -> list[str]:
+    mentions = []
+    # Only explicit, known issuer names; not similarity of document content.
+    known = sorted({d.issuer for d in reports if d.issuer != "Unknown"}, key=len, reverse=True)
+    for issuer in known:
+        expr = r"(?<!\w)" + re.escape(issuer) + r"(?!\w)"
+        if re.search(expr, question, flags=re.I):
+            mentions.append(issuer)
+    return mentions
+
+
+def _edition_mentions(question: str) -> list[tuple[int, int]]:
+    result = []
+    patterns = (
+        (r"\bQ([1-4])\s*(20\d{2})\b", lambda m: (int(m[2]), int(m[1]))),
+        (r"\b(20\d{2})\s*Q([1-4])\b", lambda m: (int(m[1]), int(m[2]))),
+        (r"\bQ([1-4])(2\d)\b", lambda m: (2000 + int(m[2]), int(m[1]))),
+    )
+    for regex, convert in patterns:
+        for match in re.finditer(regex, question, re.I):
+            point = convert(match)
+            if point not in result:
+                result.append(point)
+    return result
+
+
+def _explicit_edition_request(question: str) -> bool:
+    return bool(re.search(
+        r"\b(?:according to|in the|from the|using the|use the|selected)\b.{0,55}"
+        r"\b(?:factbook|interim report|quarterly report|report|pdf|document|edition)\b|"
+        r"\b(?:factbook|interim report|quarterly report|report edition)\b",
+        question, re.I,
+    ))
+
+
+def _comparison_requested(question: str) -> bool:
+    return bool(re.search(
+        r"\b(?:compare|comparison|difference|between|versus|vs\.?|than|"
+        r"increase|increased|decrease|decreased|decline|declined|rise|rose|grew|growth)\b",
+        question, re.I))
+
+
+def resolve_documents(question: str, selection: DocumentSelection,
+                      reports: list[DocumentRecord]) -> Resolution:
+    """Fail closed on conflicting manual choices and ambiguous automatic picks."""
+    if selection.mode not in ("auto", "manual", "compare"):
+        raise ValueError("Invalid document selection mode")
+    by_id = {doc.document_id: doc for doc in reports}
+    if not reports:
+        return Resolution((), "No indexed reports", "No PDF reports have been indexed yet.")
+
+    issuers = _issuer_matches(question, reports)
+    editions = _edition_mentions(question)
+    selected = tuple(by_id[i] for i in selection.document_ids if i in by_id)
+    if len(selected) != len(selection.document_ids) or len({d.document_id for d in selected}) != len(selected):
+        raise ValueError("One or more selected document IDs do not exist in the index")
+
+    if selection.mode == "manual":
+        if len(selected) != 1:
+            raise ValueError("Manual mode requires exactly one document ID")
+        if len(issuers) > 1 or (_comparison_requested(question) and len(editions) > 1):
+            return Resolution((), "Multiple sources requested", "This question needs more than one report. Choose Compare reports and select the two PDFs.")
+        doc = selected[0]
+        if issuers and doc.issuer not in issuers:
+            return Resolution((), "Manual issuer conflict", f"You selected {doc.display_name}, but your question mentions {', '.join(issuers)}. Select the matching report or Automatic.")
+        if _explicit_edition_request(question) and editions and (doc.report_year, doc.report_quarter) not in editions:
+            return Resolution((), "Manual edition conflict", f"You selected {doc.display_name}, but requested a different report edition. Change the dropdown to the requested report.")
+        return Resolution((doc,), "Manual selection strictly restricts the evidence")
+
+    if selection.mode == "compare":
+        if len(selected) not in (2,):
+            raise ValueError("Compare mode requires exactly two selected document IDs")
+        if not _comparison_requested(question):
+            return Resolution((), "Comparison needs explicit operation", "Ask a comparison question, or select one report for a single-value lookup.")
+        if issuers and not all(d.issuer in issuers for d in selected):
+            return Resolution((), "Selected issuers conflict", "Your comparison mentions a different bank than one of the selected reports.")
+        return Resolution(selected, "Two explicitly selected source reports")
+
+    # Automatic mode: a comparison can select TWO reports only when every
+    # named issuer/edition has exactly one matching document. Never rely on
+    # retrieval similarity or silently choose among duplicate editions.
+    from app.question_parser import parse_question
+    explicit_metric = parse_question(question).metric is not None
+    if _comparison_requested(question) and explicit_metric and len(issuers) == 2 and len(editions) == 1:
+        y, q = editions[0]
+        paired = []
+        for issuer in issuers:
+            matches = [d for d in reports if d.issuer == issuer and
+                       (d.report_year, d.report_quarter) == (y, q)]
+            if len(matches) != 1:
+                return Resolution((), "Ambiguous cross-bank comparison",
+                                  "Select the two matching report editions explicitly using Compare reports.")
+            paired.append(matches[0])
+        return Resolution(tuple(paired), "Automatically matched both named banks and their report editions")
+    if _comparison_requested(question) and len(issuers) == 1 and len(editions) == 2:
+        paired = []
+        for y, q in editions:
+            matches = [d for d in reports if d.issuer == issuers[0] and
+                       (d.report_year, d.report_quarter) == (y, q)]
+            if len(matches) > 1:
+                return Resolution((), "Ambiguous comparison edition",
+                                  "More than one report matches a requested edition. Select both reports explicitly.")
+            if len(matches) == 1:
+                paired.append(matches[0])
+        if len(paired) == 2 and paired[0].document_id != paired[1].document_id:
+            return Resolution(tuple(paired), "Automatically matched both specified reporting editions")
+        if len(reports) and len([d for d in reports if d.issuer == issuers[0]]) == 1:
+            # One report can contain both historical quarterly columns, but
+            # the answerer must still verify each cell in that report.
+            return Resolution(tuple(d for d in reports if d.issuer == issuers[0]),
+                              "Only one report for issuer; verify both quarter cells")
+        return Resolution((), "Missing or ambiguous comparison edition",
+                          "Select Compare reports and choose two valid reporting editions.")
+
+    # Automatic mode: known issuer name dominates retrieval similarity.
+    candidates = reports
+    if issuers:
+        candidates = [d for d in candidates if d.issuer in issuers]
+        if not candidates:
+            return Resolution((), "Issuer missing", "No indexed report matches the bank named in your question.")
+        if len(issuers) > 1:
+            return Resolution((), "Multi-issuer question", "Select Compare reports and choose the two reports explicitly.")
+    elif len({d.issuer for d in candidates}) > 1:
+        return Resolution((), "Bank ambiguous", "Which bank should I use? Choose a report from the dropdown or mention its bank name.")
+
+    if len(editions) >= 2:
+        # Distinguish the edition providing the evidence from the period asked
+        # about: 'According to the Q3 2026 report, what about Q3 2030?'
+        # still selects the Q3 2026 report, but the answer must abstain if
+        # the requested future period is not there.
+        if not _comparison_requested(question) and _explicit_edition_request(question):
+            y, q = editions[0]
+            matches = [d for d in candidates if (d.report_year, d.report_quarter) == (y, q)]
+            if len(matches) == 1:
+                return Resolution((matches[0],), "Explicit source report edition identified")
+        return Resolution((), "Multiple report editions requested",
+                          "Specify a comparison between the periods or choose the intended edition.")
+
+    if editions:
+        year, quarter = editions[0]
+        exact = [d for d in candidates if (d.report_year, d.report_quarter) == (year, quarter)]
+        if exact:
+            if len(exact) == 1:
+                return Resolution((exact[0],), "Exact issuer and reporting edition match")
+            return Resolution((), "Ambiguous edition", "Several reports match that bank and quarter. Please select one report.")
+        if _explicit_edition_request(question):
+            return Resolution((), "Edition not indexed", "The requested report edition is not indexed. Choose an available report.")
+        # Numeric period could be historical within the latest factbook; but
+        # if multiple reports are present, do not guess which edition to cite.
+        if len(candidates) == 1:
+            return Resolution((candidates[0],), "Only indexed report for issuer; value still requires evidence")
+        return Resolution((), "Historical period appears in multiple reports", "Several reports might contain that reporting period. Please select the report edition to use.")
+
+    if len(candidates) == 1:
+        return Resolution((candidates[0],), "Only matching indexed report")
+    return Resolution((), "Multiple editions", "Which report edition should I use? Choose a PDF from the dropdown or name its reporting quarter.")

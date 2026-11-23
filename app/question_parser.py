@@ -1,0 +1,399 @@
+"""Conservative, compositional financial question parser.
+
+No model call, no financial figures, no PDF access. Uncertain interpretations
+return a reason rather than pretending that a related metric was requested.
+"""
+from dataclasses import dataclass
+import re
+from typing import Literal
+
+from app.financial_vocabulary import BY_KEY, SEGMENTS, metric_matches
+
+Operation = Literal[
+    "lookup", "absolute_change", "decline", "percentage_change",
+    "percentage_points", "scope_difference", "currency_difference",
+]
+
+
+@dataclass(frozen=True)
+class FinancialIntent:
+    metric: str | None
+    periods: tuple[str, ...]
+    operation: Operation
+    scopes: tuple[str, ...] = ("group",)
+    country: str | None = None
+    currency_scopes: tuple[str, ...] = ()
+    desired_unit: str | None = None
+    needs_clarification: bool = False
+    uncertain: str | None = None
+    structured: bool = False
+
+
+def _clean(text: str) -> str:
+    return (text.replace("’", "'").replace("–", "-").replace("—", "-")
+            .replace("−", "-").replace("\u00a0", " "))
+
+
+def _negative_prefix(text: str, start: int) -> bool:
+    """Reject metric mentions in short explicitly negated clauses.
+
+    This does not negate 'excluding regulatory fees' inside the requested
+    *label*: qualification matching is performed before this check.
+    """
+    pre = text[max(0, start - 85):start].lower()
+    # Restrict to current phrase, respecting new statement or colon.
+    pre = re.split(r"[.:;]", pre)[-1]
+    # Check the immediate clause only.  A negated alternative such as
+    # "net profit, not its operating profit" must not become a second target.
+    # The intended metric is still recognized independently.
+    return bool(re.search(
+        r"(?:\bnot(?:\s+(?:the|its|their|reported|ordinary))?|"
+        r"\bdo\s+not\s+give(?:\s+the)?|"
+        r"\brather\s+than(?:\s+(?:the|reported|ordinary))?|"
+        r"\binstead\s+of(?:\s+(?:the|reported))?)$",
+        pre.strip(), re.I,
+    ))
+
+
+def _periods(question: str) -> tuple[str, ...]:
+    q = _clean(question)
+    hits: list[tuple[int, int, str]] = []
+
+    # Explicit compact Q326, Q3 2026, 2026 Q3, and Q3 of 2026.
+    patterns = (
+        (r"\bQ([1-4])\s*(?:of\s+)?[-/]?\s*(20\d{2})\b", lambda m: f"Q{m[1]}{m[2][-2:]}"),
+        (r"\b(20\d{2})\s*[-/]?\s*Q([1-4])\b", lambda m: f"Q{m[2]}{m[1][-2:]}"),
+        (r"\bQ([1-4])(\d{2})\b", lambda m: f"Q{m[1]}{m[2]}"),
+        (r"\b(?:first|second|third|fourth) quarter of (20\d{2})\b",
+         lambda m: f"Q{['first','second','third','fourth'].index(m[0].split()[0].lower())+1}{m[1][-2:]}"),
+        (r"\b(?:the\s+)?(20\d{2})\s+(?:first|second|third|fourth)\s+quarter\b",
+         lambda m: f"Q{['first','second','third','fourth'].index(m[0].lower().split()[-2])+1}{m[1][-2:]}"),
+        (r"\b(?:July\s*-\s*September|three months ended September)\s+(20\d{2})\b",
+         lambda m: f"Q3{m[1][-2:]}"),
+        (r"\b(?:30|end of)\s+September\s+(20\d{2})\b", lambda m: f"Q3{m[1][-2:]}"),
+    )
+    for pattern, converter in patterns:
+        for m in re.finditer(pattern, q, re.I):
+            hits.append((m.start(), m.end(), converter(m)))
+
+    # Period ends expressed as balance-sheet dates, not report editions.
+    q_month={"march":1,"june":2,"september":3,"december":4}
+    for m in re.finditer(r"\b(?:at\s+)?(?:the\s+)?(?:end\s+of\s+|30\s+|31\s+)?(March|June|September|December)\s+(20\d{2})\b",q,re.I):
+        hits.append((m.start(),m.end(),f"Q{q_month[m[1].casefold()]}{m[2][-2:]}"))
+
+    # 'at the end of the 2026 third quarter' is captured above; support
+    # 'at 30 September 2026' and 'September 2026' when the quarter is explicit.
+    for m in re.finditer(r"\b30 September (20\d{2})\b", q, re.I):
+        hits.append((m.start(), m.end(), f"Q3{m[1][-2:]}"))
+
+    # A full-calendar-year query must explicitly designate a full year.
+    for m in re.finditer(
+        r"\b(?:full[- ](?:calendar[- ]?)?year|calendar[- ]year|full year|fy)\s*(20\d{2})\b",
+        q, re.I,
+    ):
+        hits.append((m.start(), m.end(), m[1]))
+
+    # Shared-year comparison: 'between Q2 and Q3 2026' means Q2 2026
+    # versus Q3 2026. Use the shared year only when an explicit connection
+    # binds the two quarter names, never by guessing from an arbitrary year.
+    for m in re.finditer(
+        r"\bQ([1-4])\s+(?:and|to|through|versus|vs\.?)\s+Q([1-4])\s*(20\d{2})\b",
+        q, re.I,
+    ):
+        hits.append((m.start(), m.start()+2, f"Q{m[1]}{m[3][-2:]}"))
+
+    # Shared-year date comparison, e.g. 'from 30 June to 30 September 2026'.
+    month_q = {'march':1, 'june':2, 'september':3, 'december':4}
+    for m in re.finditer(
+        r"\b(?:30|31)?\s*(March|June|September|December)\s+"
+        r"(?:to|through|and|versus|vs\.?|than|-)\s+"
+        r"(?:30|31)?\s*(March|June|September|December)\s+(20\d{2})\b",q,re.I):
+        hits.append((m.start(),m.start()+len(m[1]),f"Q{month_q[m[1].casefold()]}{m[3][-2:]}"))
+    for m in re.finditer(
+        r"\bQ([1-4])\s*(?:-|\s)(?:to|than|and|versus|vs\.?)(?:-|\s)\s*Q([1-4])\s*(20\d{2})\b",q,re.I):
+        hits.append((m.start(),m.start()+2,f"Q{m[1]}{m[3][-2:]}"))
+    for m in re.finditer(
+        r"\bQ([1-4])\s+(?:than|and|to|through|versus|vs\.?|or)\s+Q([1-4])\s*(20\d{2})\b",q,re.I):
+        hits.append((m.start(),m.start()+2,f"Q{m[1]}{m[3][-2:]}"))
+    # Remove nested duplicate matches and negated periods (e.g. 'Q425, not Q326').
+    selected: list[tuple[int, int, str]] = []
+    for start, end, code in sorted(hits, key=lambda h: (h[0], -(h[1]-h[0]))):
+        if any(a <= start and end <= b for a, b, _ in selected):
+            continue
+        pre = q[max(0, start - 18):start].lower()
+        if re.search(r"\bnot\s+(?:the\s+)?$", pre):
+            continue
+        selected.append((start, end, code))
+    return tuple(dict.fromkeys(code for _, _, code in sorted(selected)))
+
+
+def _scopes(question: str) -> tuple[tuple[str, ...], str | None]:
+    q = _clean(question).casefold()
+    candidates: list[tuple[int, str]] = []
+    for name, aliases in SEGMENTS.items():
+        # Skip the 2-letter acronym match in prose; country tables use their
+        # abbreviated rows, but the question normally spells out the area.
+        for alias in aliases:
+            if len(alias) < 4:
+                continue
+            # Segment names can be followed by possessives or descriptors
+            # (e.g. "SEB Baltic division's"). Match the canonical phrase as a
+            # token sequence, not only when the alias is the final token.
+            m = re.search(rf"(?<!\w){re.escape(alias)}(?=\b|['’]s\b)", q)
+            if m:
+                candidates.append((m.start(), name))
+                break
+    # Explicit bank/division phrasing is a strong segment qualifier. Keep
+    # Baltic as a hard scope even if future vocabulary aliases are edited.
+    baltic = re.search(r"\bSEB\s+Baltic(?:\s+division)?\b", q, re.I)
+    if baltic:
+        candidates.append((baltic.start(), "baltic"))
+
+    # A named consolidated Group scope is distinct from a division scope.
+    # Detect possessive or metric-qualified forms such as "SEB Group's
+    # operating profit" / "SEB Group operating profit". Do not match
+    # "Group Functions", which remains its own Nordea reporting segment.
+    explicit_group = re.search(
+        r"\b(?:SEB|Nordea|Handelsbanken)\s+Group"
+        r"(?=(?:['’]s\b|\s+(?:operating|net|total|gross|profit|income|capital|assets|equity|revenue)\b))",
+        q, re.I,
+    )
+    if explicit_group:
+        candidates.append((explicit_group.start(), "group"))
+
+    scopes = tuple(dict.fromkeys(name for _, name in sorted(candidates))) or ("group",)
+    country = None
+    if scopes != ("group",):
+        # A country embedded in a named segment label (e.g. "Handelsbanken
+        # Sweden") identifies the segment; it is not an additional country
+        # filter. A separate country mention remains a sub-scope qualifier.
+        found = []
+        for country_name in ("finland", "sweden", "norway", "denmark"):
+            match = re.search(rf"\b{country_name}\b", q)
+            if not match:
+                continue
+            embedded_in_segment = any(
+                country_name in alias.casefold()
+                for scope in scopes for alias in SEGMENTS.get(scope, ())
+            )
+            if not embedded_in_segment:
+                found.append(country_name)
+        if len(found) == 1:
+            country = found[0].title()
+    return scopes, country
+
+
+def _currency_scopes(question: str) -> tuple[str, ...]:
+    q = _clean(question).casefold()
+    # Only infer an LCR currency from a qualifier, not from 'EUR million'
+    # (a reporting unit, not a currency-specific LCR).
+    if not re.search(r"\blcr\b|liquidity coverage ratio", q):
+        return ()
+    if re.search(r"\b(?:usd|dollar[- ]only)\s+lcr\b|\b(?:usd|dollar)[- ]only\b", q) and re.search(
+        r"\b(?:eur|euro[- ]only)\s+lcr\b|\b(?:eur|euro)[- ]only\b", q
+    ):
+        # The comparison 'USD LCR exceed EUR LCR' names both positively.
+        if re.search(r"\b(?:exceed|higher than|difference|more than)\b", q):
+            return ("USD", "EUR")
+    # First positive reference wins when other scopes are explicitly negated.
+    matches = []
+    for name, pattern in (
+        ("EUR", r"\b(?:eur|euro)[- ]only\b|\b(?:eur|euro)\s+(?:lcr|liquidity coverage ratio)\b"),
+        ("USD", r"\b(?:usd|dollar)[- ]only\b|\b(?:usd|dollar)\s+(?:lcr|liquidity coverage ratio)\b"),
+        ("combined", r"\bcombined\s+lcr\b"),
+    ):
+        for m in re.finditer(pattern, q):
+            if _negative_prefix(q, m.start()):
+                continue
+            matches.append((m.start(), name))
+    return tuple(dict.fromkeys(name for _, name in sorted(matches)))
+
+
+def _operation(question: str, scopes: tuple[str, ...], currency_scopes: tuple[str, ...]) -> Operation:
+    q = _clean(question).casefold()
+    if re.search(r"percentage\s+points?|\bpp\b", q):
+        return "currency_difference" if len(currency_scopes) == 2 else "percentage_points"
+    if re.search(
+        r"percentage\s+(?:growth|change|decline|decrease|increase)|"
+        r"percent\s+(?:growth|change|decline|decrease|increase)|"
+        r"by what percentage|what percentage|year.over.year.*percentage|"
+        r"including (?:its |the )?percentage change|"
+        r"both.{0,60}\bpercent(?:age)?\b",
+        q,
+    ):
+        return "percentage_change"
+    if re.search(r"\bas a percentage\b",q) and re.search(r"\b(?:grow|grew|growth|increase|decrease|change|changed|from|between)\b",q):
+        return "percentage_change"
+    if len(currency_scopes) == 2 and re.search(r"\bexceed|higher|more than|difference", q):
+        return "currency_difference"
+    if len(scopes) == 2 and re.search(r"\bmore\b|\bexceed\b|\bdifference\b|\bcompare", q):
+        return "scope_difference"
+    if re.search(r"\bdecline\b|\bdecrease\b|\bfell\b|\bdrop(?:ped)?\b", q):
+        return "decline"
+    if re.search(r"\b(?:rise|rose|increase|increased|grow|grew|growth|higher|difference|change|compare|comparing)\b", q):
+        return "absolute_change"
+    return "lookup"
+
+
+def _metric(question: str, scopes: tuple[str, ...]) -> tuple[str | None, str | None, bool]:
+    q = _clean(question)
+    hits = metric_matches(q)
+    positives = [h for h in hits if not _negative_prefix(q, h[2])]
+    keys = {h[0].key for h in positives}
+
+    # Specific qualifiers supersede their unqualified parent metric, but not
+    # independent unrelated metrics.
+    if "basic_earnings_per_share" in keys or "diluted_earnings_per_share" in keys:
+        keys.discard("earnings_per_share")
+    if "basic_earnings_per_share" in keys and "diluted_earnings_per_share" in keys:
+        return None, "Basic and diluted EPS are separate metrics", False
+    if "net_profit_adjusted" in keys:
+        keys.discard("net_profit")
+    if "net_other_income" in keys:
+        keys.discard("other_income_group")
+    if "operating_profit_adjusted" in keys:
+        keys.discard("operating_profit")
+    if "roe_amortised" in keys:
+        keys.discard("roe")
+    if "roe_tangible" in keys:
+        keys.discard("roe")
+    if "cost_to_income_ex_fees" in keys:
+        keys.discard("segment_total_income")
+    if "cost_to_income_ex_fees" in keys:
+        keys.discard("cost_income_ratio")
+    if "operating_expenses_ex_reg_fees" in keys:
+        keys.discard("total_operating_income")
+    if "cet1_ratio" in keys:
+        keys.discard("tier1_ratio")
+    # Plain "total income" is a literal Group/segment table row, while
+    # "total operating income" is a separate consolidated metric synonym.
+    # Keep the scope-specific concept for the former instead of forcing every
+    # segment query through the Group income statement resolver.
+    plain_total_income = bool(re.search(r"\btotal income\b", q, re.I)) and not bool(
+        re.search(r"\btotal operating income\b", q, re.I)
+    )
+    if plain_total_income:
+        keys.discard("total_operating_income")
+        if scopes == ("group",):
+            keys.discard("segment_total_income")
+        else:
+            keys.discard("group_total_income")
+    elif "total_operating_income" in keys:
+        keys.discard("segment_total_income")
+        keys.discard("group_total_income")
+    if "group_total_income" in keys and scopes == ("group",):
+        keys.discard("segment_total_income")
+    if "group_total_income" in keys and scopes != ("group",):
+        keys.discard("group_total_income")
+    if "derivative_assets" in keys and "total_assets" in keys:
+        keys.discard("total_assets")
+    if "profit_before_credit_losses_fees" in keys:
+        keys.discard("group_total_income")
+    # REA is a generic parent concept. A qualified type always wins when
+    # the user explicitly names credit risk or the banking-group total.
+    if "credit_rea" in keys or "total_rea" in keys or "operational_rea" in keys:
+        keys.discard("segment_rea")
+    if "segment_total_income" in keys and scopes == ("group",):
+        # 'Total income' for the group is not silently mapped to total operating income.
+        return None, "Group 'total income' is ambiguous without a reporting definition", False
+
+    if not keys:
+        # An unqualified "profit" defaults to net profit. More specific forms
+        # (operating/gross/pre-tax profit, profit before/after tax, profit margin)
+        # are not collapsed into net profit; those remain separate concepts or
+        # require clarification. The answer layer names this default explicitly.
+        plain_profit = re.search(r"\bprofit\b", q, re.I)
+        qualified_profit = re.search(
+            r"\b(?:net|operating|gross|pre[ -]?tax)\s+profit\b|"
+            r"\bprofit\s+(?:before|after|margin|for\s+the\s+period)\b|\bprofitability\b", q, re.I
+        )
+        if plain_profit and not qualified_profit:
+            return "net_profit", None, True
+        if re.search(r"\b(?:income|revenue|turnover|sales)\b|\bhow much money\b", q, re.I):
+            return None, "Financial income measure is unspecified", False
+        return None, None, False
+    if len(keys) > 1:
+        # 'Operational-risk REA, not credit-risk REA' has an explicitly
+        # negated hit; other two-metric requests are unsupported here.
+        return None, f"Multiple financial concepts: {', '.join(sorted(keys))}", False
+    key = next(iter(keys))
+    matched = [h[1] for h in positives if h[0].key == key]
+    old_exact = bool(re.search(r"\b" + re.escape(BY_KEY[key].rows[0]) + r"\b", q, re.I))
+    # The legacy reader already understands 'LCR' as an exact metric name.
+    if key == "lcr" and re.search(r"\blcr\b", q, re.I):
+        old_exact = True
+    return key, None, not old_exact
+
+
+def parse_question(question: str) -> FinancialIntent:
+    """Interpret a question without inventing a metric or value.
+
+    .structured marks questions requiring new multi-cell/qualification routing.
+    The legacy single-cell lookup remains the default for already-supported
+    simple queries, ensuring that old mocked fallback tests remain meaningful.
+    """
+    q = _clean(question).strip()
+    periods = _periods(q)
+    scopes, country = _scopes(q)
+    currencies = _currency_scopes(q)
+    operation = _operation(q, scopes, currencies)
+    metric, problem, paraphrase = _metric(q, scopes)
+
+    # "Income" in isolation and "how much money" require clarification,
+    # regardless of whether a quarter is present.
+    if problem == "Financial income measure is unspecified" and scopes == ("group",):
+        return FinancialIntent(metric, periods, operation, scopes, country,
+                               currencies, needs_clarification=True, uncertain=problem,
+                               structured=True)
+    if problem and metric is None:
+        return FinancialIntent(metric, periods, operation, scopes, country,
+                               currencies, uncertain=problem, structured=True)
+
+    advanced = (
+        paraphrase or country is not None or len(scopes) > 1
+        or len(currencies) > 1 or operation != "lookup"
+        or bool(re.search(r"\bnot\b|\brather than\b|\binstead of\b|\bexcluding items affecting comparability\b|\bwith amortis(?:ed|ized)\b", q, re.I))
+        or bool(re.search(r"\b(?:Q[1-4]\d{2}\b).{0,16}\bnot\b", q, re.I))
+        or (metric in {"net_profit_adjusted", "roe_amortised", "cash_central_banks",
+                       "operational_rea", "segment_rea"})
+        or bool(re.search(
+            r"full[- ]calendar[- ]year|euro[- ]only|dollar[- ]only|"
+            r"\bQ[1-4]\s+of\s+20\d{2}|\b(?:first|second|third|fourth) quarter|"
+            r"July\s*-\s*September|30 September|three months ended",
+            q, re.I,
+        ))
+    )
+    if metric is None:
+        return FinancialIntent(None, periods, operation, scopes, country,
+                               currencies, uncertain="Metric not recognized", structured=False)
+
+    # A simple undated metric question has no exact table column to resolve.
+    # Preserve the existing evidence-grounded Qwen fallback for these questions
+    # (e.g. "What is the CET1 ratio?") instead of entering the structured
+    # resolver, which correctly requires a specific reporting period.
+    # Do NOT apply this exception to comparisons, country/segment questions,
+    # or currency-qualified metrics: they must retain strict validation.
+    if (
+        operation == "lookup"
+        and not periods
+        and scopes == ("group",)
+        and country is None
+        and not currencies
+    ):
+        return FinancialIntent(
+            metric, periods, operation, scopes, country, currencies,
+            BY_KEY[metric].unit, structured=False,
+        )
+
+    if operation in {"absolute_change", "decline", "percentage_change", "percentage_points"} and len(periods) != 2:
+        # A multi-period operation with fewer than two periods is potentially
+        # ambiguous, unless it is a same-period currency / segment comparison.
+        return FinancialIntent(metric, periods, operation, scopes, country,
+                               currencies, uncertain="Comparison requires two reporting periods",
+                               structured=True)
+    if operation in {"scope_difference", "currency_difference"} and len(periods) != 1:
+        return FinancialIntent(metric, periods, operation, scopes, country,
+                               currencies, uncertain="Scope comparison requires one reporting period",
+                               structured=True)
+    return FinancialIntent(metric, periods, operation, scopes, country, currencies,
+                           BY_KEY[metric].unit, structured=advanced)

@@ -1,0 +1,277 @@
+"""Document-scoped, fail-closed scalar lookup for financial quarterly tables.
+
+Day 10.2 supports both compact/one-line factbook tables and quarterly reports
+whose PyMuPDF sort=True extraction has:
+- years on a second header row, sometimes with YTD and annual columns;
+- values such as ``10 881`` using spaces as thousands separators;
+- accounting-row footnotes such as ``Net interest income¹⁾``;
+- percentages without a page-level monetary unit.
+
+The resolver only uses text belonging to `document_id`. It never looks up a
+number from another report or assumes a reporting currency from a bank name.
+"""
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+import re
+
+from app.financial_vocabulary import BY_KEY
+from app.table_lookup import FinancialCell, _get_pages
+
+_Q = re.compile(r"\bQ([1-4])\b", re.I)
+_YEAR = re.compile(r"\b20\d{2}\b")
+_PAIRED = re.compile(r"\bQ([1-4])\s*(20\d{2})\b", re.I)
+_COMPACT = re.compile(r"\bQ([1-4])(2\d)\b", re.I)
+_UNIT = re.compile(r"\b(EUR|SEK|NOK|DKK|USD|GBP)\s*(m|mn|million|millions|bn|billion|billions)\b", re.I)
+_FOOTNOTE = re.compile(r"^(?:\s*(?:\d+\)|[¹²³⁴⁵⁶⁷⁸⁹⁰]+[⁾)]|\(\d+\)|⁽[¹²³⁴⁵⁶⁷⁸⁹⁰]+⁾))+")
+_PERCENT_UNIT = re.compile(r"^\s*,?\s*%\s*")
+_MONEY_UNIT = re.compile(r"^\s*,?\s*(?:EUR|SEK|NOK|DKK|USD|GBP)\s*(?:bn|m|mn|million|billions?)\s*", re.I)
+
+_EXTRA_ROWS = {
+    "net_profit": ("Net profit",),
+    "operating_profit_adjusted": ("Operating profit before items affecting comparability",),
+    "aum": ("Assets under management",),
+    "fte": ("Number of full time equivalents", "Number of full-time equivalents",
+            "Number of full-time equivalents (FTEs)"),
+    "lcr": ("Liquidity Coverage Ratio (LCR)",),
+    "total_rea": ("Risk exposure amount",),
+}
+
+
+def _row_labels(metric: str) -> tuple[str, ...]:
+    return (*BY_KEY[metric].rows, *_EXTRA_ROWS.get(metric, ()))
+
+
+def _quarter_columns(header: str) -> list[str]:
+    """Read complete quarter/year pairs from compact OR stacked headers.
+
+    This helper returns *quarter* labels only. `_aligned_columns` additionally
+    includes non-quarter columns for correct row-value alignment.
+    """
+    compact = [(int(q), 2000 + int(y)) for q, y in _COMPACT.findall(header)]
+    pairs = [(int(q), int(y)) for q, y in _PAIRED.findall(header)]
+    if compact and len(compact) >= 2:
+        result = [f"Q{q}{y % 100:02d}" for q, y in compact]
+        return result if len(set(result)) == len(result) else []
+    if len(pairs) >= 2:
+        # Consecutive compact pairs are unambiguous. Stacked header strings
+        # with one accidental boundary pair must not enter this branch.
+        total_q = len(_Q.findall(header))
+        if len(pairs) == total_q:
+            result = [f"Q{q}{y % 100:02d}" for q, y in pairs]
+            return result if len(set(result)) == len(result) else []
+    qs = [int(q) for q in _Q.findall(header)]
+    ys = [int(y) for y in _YEAR.findall(header)]
+    if len(qs) >= 2 and len(ys) >= len(qs) and len(qs) <= 16:
+        result = [f"Q{q}{y % 100:02d}" for q, y in zip(qs, ys)]
+        return result if len(set(result)) == len(result) else []
+    return []
+
+
+def _aligned_columns(qrow: str, yrow: str = "") -> list[str]:
+    """Quarter labels followed by YTD/full-year placeholders when present.
+
+    Year counts determine the *total* number of data cells. This matters for
+    SEB's 'Q3 Q2 Q3 Jan-Sep Full year' heading, which has six columns but
+    only the first three refer to individual quarters.
+    """
+    if yrow and "%" in yrow:
+        # Growth-rate interleaving requires extra column alignment logic. No
+        # safe assumption that consecutive numbers correspond to quarters.
+        return []
+    merged = qrow + "\n" + yrow
+    qs = _quarter_columns(merged)
+    if len(qs) < 2:
+        return []
+    n_years = len(_YEAR.findall(yrow)) if yrow else 0
+    if n_years and n_years < len(qs):
+        return []
+    n_total = n_years if n_years else len(qs)
+    if not 2 <= n_total <= 16:
+        return []
+    return qs + [f"OTHER_{i}" for i in range(n_total - len(qs))]
+
+
+def _currency_unit(text: str) -> str | None:
+    choices = set()
+    for m in _UNIT.finditer(text):
+        scale = "bn" if m[2].casefold() in {"bn", "billion", "billions"} else "m"
+        choices.add(m[1].upper() + scale)
+    return next(iter(choices)) if len(choices) == 1 else None
+
+
+def _label_tail(line: str, alias: str) -> tuple[str, str] | None:
+    """Strict row-prefix match, allowing footnotes/units but not qualifiers."""
+    s = line.strip()
+    # PDF text layout may split a row label across physical lines; joining
+    # those lines can introduce multiple spaces. Compare words, not spacing.
+    pattern = r"^" + r"\s+".join(re.escape(w) for w in alias.split())
+    match = re.match(pattern, s, re.I)
+    if not match:
+        return None
+    rest = s[match.end():]
+    if rest and rest[0].isalpha():
+        return None  # e.g. 'Operating profits' vs 'Operating profit'
+    # Strip a footnote immediately following a metric label.
+    rest = _FOOTNOTE.sub("", rest)
+    prefix = s[:match.end()]
+    for unit_regex in (_PERCENT_UNIT, _MONEY_UNIT):
+        m = unit_regex.match(rest)
+        if m:
+            prefix += rest[:m.end()]
+            rest = rest[m.end():]
+            break
+    rest = _FOOTNOTE.sub("", rest)
+    # The remaining suffix must start with a numeric data cell, not an
+    # adjusted metric qualifier ('before ...', 'excluding ...').
+    rest = rest.strip()
+    if not rest or not (rest[0].isdigit() or rest[0] in "+-"):
+        return None
+    return rest, prefix
+
+
+def _parse_value(raw: str, percent: bool) -> Decimal | None:
+    s = raw.strip().rstrip("%")
+    if re.fullmatch(r"[+-]?\d{1,3}(?:[ ,]\d{3})+(?:\.\d+)?", s):
+        s = s.replace(",", "").replace(" ", "")
+    elif percent and re.fullmatch(r"[+-]?\d+,\d{1,2}", s):
+        s = s.replace(",", ".")
+    elif not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s):
+        return None
+    try:
+        return Decimal(s)
+    except InvalidOperation:
+        return None
+
+
+def _extract_row(line: str, metric: str, ncolumns: int, col: int,
+                 header_unit: str | None):
+    concept = BY_KEY[metric]
+    for alias in sorted(_row_labels(metric), key=len, reverse=True):
+        found = _label_tail(line, alias)
+        if found is None:
+            continue
+        tail, prefix = found
+        unit = _currency_unit(prefix) or header_unit
+        if concept.unit == "percent":
+            unit = "percent"
+        elif concept.unit == "count":
+            unit = "count"
+        if not unit:
+            continue
+        # Table cells are separated by runs of >=2 spaces in fitz sort=True.
+        # A single space *within* a cell can be a thousands separator.
+        cells = re.split(r"\s{2,}", tail)
+        if len(cells) != ncolumns:
+            # Support simple flattened fixture/extractor lines with distinct
+            # comma-grouped numbers and single-space separators.
+            cells = tail.split()
+        if len(cells) != ncolumns or col >= len(cells):
+            continue
+        if unit != "percent" and any(x.endswith("%") for x in cells):
+            continue
+        values = [_parse_value(x, unit == "percent") for x in cells]
+        if any(x is None for x in values):
+            continue
+        return values[col], unit, alias, cells[col]
+    return None
+
+
+def _is_financial_row(line: str) -> bool:
+    x = line.strip().casefold()
+    return any(x.startswith(alias.casefold()) and
+               (len(x) == len(alias) or not x[len(alias)].isalpha())
+               for metric in BY_KEY for alias in _row_labels(metric))
+
+
+def _table_candidates(lines: list[str]):
+    """Yield (all column IDs, first row, final row, currency/header context)."""
+    seen = set()
+    n = len(lines)
+    for i, line in enumerate(lines):
+        qrow = line.strip()
+        # Option A: stacked Q3 Q2 Q1 / SEK m 2026 2026 2026.
+        qcount = len(_Q.findall(qrow)) + len(_COMPACT.findall(qrow))
+        if qcount >= 2 and len(qrow) < 180:
+            nextline = next((lines[j] for j in range(i+1, min(i+4,n)) if lines[j].strip()), "")
+            if len(_YEAR.findall(nextline)) >= qcount:
+                columns = _aligned_columns(qrow, nextline)
+                end_header = next((j for j in range(i+1,min(i+4,n)) if lines[j] == nextline), i+1)
+            else:
+                # Option B: 'SEKm Q3 2026 Q2 2026' all on one line.
+                columns = _aligned_columns(qrow)
+                end_header = i
+        elif re.match(r"^\s*(?:EUR|SEK|NOK|DKK|USD|GBP)\s*(?:m|bn)\b", line, re.I):
+            # Option C: header-unit line *before* a separate Q heading.
+            nxt = next((j for j in range(i+1,min(i+5,n)) if len(_Q.findall(lines[j])) >= 2), None)
+            if nxt is None:
+                continue
+            qline = lines[nxt].strip()
+            yline = next((lines[j] for j in range(nxt+1,min(nxt+4,n)) if lines[j].strip()), "")
+            columns = _aligned_columns(qline, yline if _YEAR.search(yline) else "")
+            end_header = nxt + (1 if _YEAR.search(yline) else 0)
+        else:
+            continue
+        if len(columns) < 2 or (i, tuple(columns)) in seen:
+            continue
+        seen.add((i, tuple(columns)))
+        # A table must have a financial row shortly after its header.
+        first = next((j for j in range(end_header+1, min(end_header+20,n))
+                      if _is_financial_row(lines[j])), None)
+        if first is None:
+            continue
+        context_start = i
+        # Only use the immediately preceding currency/unit header, never an
+        # earlier unrelated metric row (SEK bn vs SEK m).
+        if i > 0 and re.match(r"^\s*(?:EUR|SEK|NOK|DKK|USD|GBP)\s*(?:m|bn)\s*$", lines[i-1], re.I):
+            context_start = i-1
+        context = "\n".join(lines[context_start:end_header+1])
+        # A new recognized table heading terminates this one.
+        limit = min(n, first+85)
+        for j in range(first+1,limit):
+            if re.search(r"\b(?:income statement|key figures|balance sheet)\b.*\b(?:quarters?|condensed)\b", lines[j], re.I):
+                limit = j
+                break
+        yield columns, first, limit, context
+
+
+def generic_cell(metric: str, period: str, document_id: str, *, scope: str = "group") -> FinancialCell | None:
+    """Return only uniquely verifiable quarterly group metrics from *one* PDF.
+
+    Duplicate identical values on multiple pages are acceptable. Conflicting
+    values or units in validated tables force abstention. Prefer an exact
+    income-statement/key-figures table over an executive-summary table when
+    reporting otherwise-identical figures.
+    """
+    if scope != "group" or not re.fullmatch(r"Q[1-4]\d{2}", period) or metric not in BY_KEY:
+        return None
+    concept = BY_KEY[metric]
+    if concept.table not in {"income", "balance", "capital", "rea", "lcr"}:
+        return None
+    matches = []
+    for page in _get_pages(document_id):
+        lines = page["text"].splitlines()
+        for columns, first, last, context in _table_candidates(lines):
+            if period not in columns:
+                continue
+            index = columns.index(period)
+            header_unit = _currency_unit(context)
+            for i in range(first,last):
+                row = _extract_row(lines[i],metric,len(columns),index,header_unit)
+                if row is None and i+1 < last and _is_financial_row(lines[i]):
+                    row = _extract_row(lines[i].strip()+"  "+lines[i+1].strip(),metric,
+                                       len(columns),index,header_unit)
+                if row is None:
+                    continue
+                value, unit, label, raw = row
+                matches.append(FinancialCell(metric=metric,period=period,scope=scope,
+                                             value=value,unit=unit,document=page["document"],
+                                             page=page["page"],row_label=label,raw_value=raw))
+    if not matches:
+        return None
+    # A disagreement is not repaired by selecting a convenient page.
+    if len({(x.value,x.unit) for x in matches}) != 1:
+        return None
+    # Prefer the dedicated, more detailed table when value/unit agree.
+    return sorted(matches, key=lambda c:(0 if c.row_label.casefold() == BY_KEY[metric].rows[0].casefold() else 1,
+                                        c.page))[0]
